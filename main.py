@@ -13,7 +13,7 @@ def main() -> None:
     print("Loading knowledge base…")
     bot = SupportAssistant()
     state, history = ConversationState(), []
-    print("NovaCell Support Assistant. I can't see your account. Type 'quit' to exit, 'clear' to reset.\n")
+    print("NovaCell Support Assistant. Ask a question or request a refund for a recent recharge. Type 'quit' to exit, 'clear' to reset.\n")
 
     while True:
         try:
@@ -47,6 +47,8 @@ def main() -> None:
             print(("\n[Answer withdrawn] " if printed.strip() else "") + turn.text, end="")
         print()
 
+        for step in turn.agent_steps:
+            print(f"   {step}")
         if turn.kind in {"answer", "boundary"} and turn.cited_sources:
             print("Sources: " + ", ".join(dict.fromkeys(s.doc_id for s in turn.cited_sources)))
         if turn.offer_human:

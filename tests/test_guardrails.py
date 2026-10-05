@@ -19,6 +19,9 @@ def test_high_risk_and_human():
     assert "high_risk" in flags("I want a refund for the double charge")
     assert "human_request" in flags("Can I speak to a real person please")
     assert "emergency" in flags("I can't call an ambulance from my phone")
+    assert "emergency" in flags("I can't get through to 999")
+    for q in ["I want a refund of ₹999.", "refund 999 rupees", "Refund of 999 please", "INR 112 recharge"]:
+        assert "emergency" not in flags(q), q
 
 
 def test_injection_but_not_hotspot():

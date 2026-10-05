@@ -63,6 +63,9 @@ PERSONAL_DATA = re.compile(
     r"|\bhow much (data|credit|balance|money) (do i have|is left|have i)\b",
     re.I,
 )
+# Money amounts, so "a refund of ₹999" isn't read as the emergency number 999.
+_AMOUNT = re.compile(r"(?:₹|\brs\.?|\binr)\s*\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*(?:rupees?|rs\b|inr\b)"
+                     r"|\b(?:refund|recharge)(?: of)?\s+\d[\d,]*", re.I)
 INJECTION = _rx(
     r"ignore (all |your |the |previous |prior )*(rules|instructions|prompt)",
     r"disregard (all |your |the )*(rules|instructions)",
@@ -94,7 +97,7 @@ def detect_intents(text: str) -> IntentFlags:
     return IntentFlags(
         human_request=bool(HUMAN_REQUEST.search(text)),
         high_risk=bool(HIGH_RISK.search(text)),
-        emergency=bool(EMERGENCY.search(text)),
+        emergency=bool(EMERGENCY.search(_AMOUNT.sub(" ", text))),
         personal_data=bool(PERSONAL_DATA.search(text)),
         injection=bool(INJECTION.search(text)),
         frustration=bool(FRUSTRATION.search(text)),

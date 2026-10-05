@@ -42,6 +42,34 @@ copy .env.example .env        # then add your GROQ_API_KEY
    offered in staffed hours (8am–10pm), otherwise a callback form (consent required). The handoff package
    (redacted transcript, triggers, topic, sources tried, feedback) goes to `logs/handoffs.jsonl`.
 
+## Refund Agent (`agent_PRD.md`)
+
+Every message is first classified as `requirement_inquiry` (the RAG pipeline above, unchanged) or
+`refund_request` (the Refund Agent). Emergency and prompt-injection checks still run first.
+
+- **Intent** (`intent.py`): messages with no refund-like words go straight to RAG with no extra LLM call.
+  Otherwise the LLM classifies them; "cancel my recharge" is a refund request, "how do I cancel a recharge?"
+  is an inquiry. Keyword rules are the fallback if the LLM is unavailable.
+- **Data** (`refund_data.py`): hard-coded accounts. The signed-in user is `DEMO_USER_ID` (`user_123`, Rahul:
+  ₹999 and ₹499 recharges). `user_321` has a 15-day-old recharge for the "too old" scenario. Each chat session
+  works on its own copy; switch user or reset it under **Demo account** in the sidebar.
+- **Tools** (`refund_tools.py`): `get_user_account`, `validate_refund`, `process_refund` (simulated) and
+  `submit_to_support`. The LLM can call only the first two, with the user ID bound from the session.
+- **Agent** (`refund_agent.py`): the LLM calls the read-only tools; application code then decides:
+  - the amount must be one the customer typed (never invented); with no amount, one refundable recharge is
+    offered, several are listed for the customer to pick;
+  - eligibility comes only from `validate_refund` (completed, ≤ 7 days, 0 < amount ≤ recharge, not already
+    refunded);
+  - **≤ ₹499**: ask for explicit confirmation (buttons or "Yes, proceed"); unclear replies are asked again;
+    only then `process_refund`, which re-checks every rule itself;
+  - **> ₹499**: `submit_to_support`; the reply says the Support Team will review it, nothing more.
+  Replies are fixed templates filled from tool results. Each turn's steps (`[Intent]`, `[Agent]`,
+  `[Validation]`, `[Refund]`) show under **Agent steps** and go to `logs/interactions.jsonl`.
+- **Clear conversation** drops the history and any pending refund; simulated account data is kept.
+
+Try: "I want a refund of ₹499" → Confirm; "I want a refund of ₹999"; "Give me a refund of ₹2,000"; "I want a
+refund"; then ₹499 again (already refunded); switch to Priya and ask for ₹299 (outside the window).
+
 ## Keeping knowledge current (no code release)
 
 - **Knowledge Admin page**: edit/add/retire FAQ rows, import/export the FAQ CSV, upload/retire PDF guides,
@@ -60,6 +88,7 @@ copy .env.example .env        # then add your GROQ_API_KEY
 ## v1 limits
 
 - The live-agent platform is not integrated (PRD open question Q2), so handoffs are recorded to a file.
-- Intent detection is keyword/regex based, which is easy to audit but misses paraphrases.
+- Guardrail flags are keyword/regex based, which is easy to audit but misses paraphrases.
+- Refund amounts must be typed as digits ("₹499", "499 rupees"); "four ninety-nine" makes the agent ask.
 - The seed content uses "MyTelecom app" and "611" (PRD open question Q3). The bot repeats what the sources say.
 - The Knowledge Admin page has no roles. Set `ADMIN_PASSCODE` in `.env` to put a passcode on it.

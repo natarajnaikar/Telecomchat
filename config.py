@@ -38,6 +38,13 @@ HISTORY_TURNS = 6  # FR-04
 MAX_INPUT_CHARS = 1000  # NFR-18
 PROMPT_VERSION = "v1.0"
 
+# --- Refund agent (agent_PRD.md) ------------------------------------------
+# Stands in for the authenticated session user; the customer is never asked for it (FR-15..FR-17).
+DEMO_USER_ID = os.getenv("DEMO_USER_ID", "user_123")
+REFUND_WINDOW_DAYS = 7  # FR-25
+REFUND_APPROVAL_LIMIT = 499  # FR-36: refunds above this go to the Support Team
+AGENT_MAX_STEPS = 4  # cap on LLM tool-calling rounds per turn
+
 # --- Support channels (from the knowledge base; see PRD Q3) --------------
 SUPPORT_PHONE = "611"
 SELF_SERVE_APP = "MyTelecom app"

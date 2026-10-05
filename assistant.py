@@ -1,4 +1,7 @@
-"""NovaCell Support Assistant: guardrails -> retrieval -> grounded generation -> checks.
+"""NovaCell Support Assistant: guardrails -> intent routing -> RAG or Refund Agent.
+
+requirement_inquiry: retrieval -> grounded generation -> checks (unchanged).
+refund_request: the Refund Agent in refund_agent.py (agent_PRD.md).
 
 Both UIs (app.py, main.py) use SupportAssistant.respond(), then consume Turn.stream().
 """
@@ -14,6 +17,10 @@ from langchain_core.prompts import ChatPromptTemplate
 import config
 import interaction_log
 from guardrails import IntentFlags, detect_intents, unsupported_numbers
+from intent import REFUND_REQUEST, REQUIREMENT_INQUIRY, IntentResult, classify
+from refund_agent import AgentResult, RefundAgent, RefundState
+from refund_data import AccountStore
+from refund_tools import RefundTools
 from retriever import MergedRetriever, RetrievedDoc, format_context
 
 NO_ANSWER = "NO_ANSWER"
@@ -82,12 +89,15 @@ class ConversationState:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     consecutive_no_answer: int = 0
     frustration_turns: int = 0
+    user_id: str = config.DEMO_USER_ID  # from the (simulated) authenticated session
+    refund: RefundState = field(default_factory=RefundState)
 
 
 @dataclass
 class Turn:
     question: str
-    kind: str = "answer"  # answer | no_answer | out_of_scope | blocked | boundary | high_risk | emergency | injection | error
+    kind: str = "answer"  # answer | no_answer | out_of_scope | blocked | boundary | high_risk | emergency | injection | error | refund
+    intent: str = ""  # requirement_inquiry | refund_request
     rewritten: str = ""
     text: str = ""
     sources: list[RetrievedDoc] = field(default_factory=list)
@@ -97,6 +107,9 @@ class Turn:
     notice: str = ""  # shown before the answer (e.g. "don't share PINs")
     replaced: bool = False  # True if the streamed text was replaced by a guardrail
     best_score: float = 0.0
+    agent_steps: list[str] = field(default_factory=list)  # refund workflow trace (§12)
+    refund_status: str = ""
+    needs_confirmation: bool = False  # show Confirm / Cancel for an eligible refund <= the approval limit
     _stream: Iterator[str] | None = None
     _finalize: callable = None
 
@@ -117,8 +130,9 @@ class Turn:
 
 
 class SupportAssistant:
-    def __init__(self):
+    def __init__(self, accounts: AccountStore | None = None):
         self.retriever = MergedRetriever()
+        self.accounts = accounts or AccountStore()  # default simulated data, e.g. for the CLI
         self._llm = None
 
     @property
@@ -147,7 +161,11 @@ class SupportAssistant:
         except Exception:
             return question
 
-    def respond(self, question: str, history: list[dict], state: ConversationState) -> Turn:
+    def classify(self, question: str, history: list[dict]) -> IntentResult:
+        return classify(question, history, lambda: self.llm)
+
+    def respond(self, question: str, history: list[dict], state: ConversationState,
+                accounts: AccountStore | None = None) -> Turn:
         started = time.perf_counter()
         question = question.strip()[: config.MAX_INPUT_CHARS]
         flags = detect_intents(question)
@@ -167,6 +185,22 @@ class SupportAssistant:
             return self._canned(turn, "emergency", MSG_EMERGENCY, ["E6_safety"], state, started)
         if flags.injection:
             return self._canned(turn, "injection", MSG_INJECTION, [], state, started)
+
+        # --- Intent routing (agent_PRD.md §6.1) ----------------------------
+        agent = RefundAgent(RefundTools(accounts or self.accounts), lambda: self.llm)
+        if state.refund.pending:  # a reply to the agent's question or confirmation request
+            result = agent.resume(question, history, state.refund, state.user_id,
+                                  lambda q: self.classify(q, history).intent)
+            if not result.handoff_to_rag:
+                return self._agent_turn(turn, result, state, started)
+            turn.agent_steps = result.steps
+            turn.intent = REQUIREMENT_INQUIRY
+        else:
+            intent = self.classify(question, history)
+            turn.intent = intent.intent
+            if intent.intent == REFUND_REQUEST:
+                return self._agent_turn(turn, agent.start(question, history, state.refund, state.user_id),
+                                        state, started, intent_method=intent.method)
         if flags.high_risk:
             return self._canned(turn, "high_risk", MSG_HIGH_RISK, ["E4_high_risk"], state, started)
         if flags.human_request:
@@ -248,6 +282,15 @@ class SupportAssistant:
         return turn
 
     # ------------------------------------------------------------------
+    def _agent_turn(self, turn: Turn, result: AgentResult, state: ConversationState, started: float,
+                    **extra) -> Turn:
+        turn.kind, turn.text, turn.intent = "refund", result.text, REFUND_REQUEST
+        turn.agent_steps, turn.refund_status = result.steps, result.status.value
+        turn.needs_confirmation = result.needs_confirmation
+        state.consecutive_no_answer = 0
+        self._log(turn, state, started, refund_amount=result.amount, **extra)
+        return turn
+
     def _canned(self, turn: Turn, kind: str, text: str, triggers: list[str], state: ConversationState,
                 started: float, **extra) -> Turn:
         turn.kind, turn.text, turn.triggers = kind, text, triggers
@@ -270,6 +313,7 @@ class SupportAssistant:
             "question": turn.question,
             "rewritten_query": turn.rewritten,
             "kind": turn.kind,
+            "intent": turn.intent,
             "flags": turn.flags.active(),
             "triggers": turn.triggers,
             "best_score": round(turn.best_score, 3),
@@ -278,6 +322,7 @@ class SupportAssistant:
             "model": config.LLM_MODEL,
             "prompt_version": config.PROMPT_VERSION,
             "latency_s": round(time.perf_counter() - started, 2),
+            **({"agent_steps": turn.agent_steps, "refund_status": turn.refund_status} if turn.agent_steps else {}),
             **extra,
         })
 

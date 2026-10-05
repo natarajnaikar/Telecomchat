@@ -9,6 +9,9 @@ import streamlit as st
 import config
 import escalation
 from assistant import ConversationState, SupportAssistant, log_feedback
+from refund_agent import RefundStatus
+from refund_data import USERS, AccountStore
+from refund_tools import inr
 
 st.set_page_config(page_title="NovaCell Support", page_icon="💬", layout="centered")
 
@@ -20,13 +23,17 @@ SAMPLE_QUESTIONS = [
     "My calls keep going straight to voicemail",
     "I can't log in to the MyTelecom app",
     "What's my data balance?",
+    "I want a refund of ₹499",
+    "I want a refund of ₹999",
+    "I want a refund",
 ]
 
 WELCOME = (
     "Hi! I'm the NovaCell support assistant. I can help with **mobile data, bills, SIM/eSIM, roaming, "
     "calls and the app**, using NovaCell's official help content.\n\n"
-    "I **can't see your account** (balance, usage or bills), and I won't ask for passwords or card "
-    "details. You can talk to a person at any time using the button in the sidebar."
+    "I **can't see your balance, usage or bills**, and I won't ask for passwords or card details. "
+    "I can also help you **request a refund for a recent recharge**. You can talk to a person at any "
+    "time using the button in the sidebar."
 )
 DOWN_REASONS = ["Wrong information", "Unclear", "Didn't solve my problem", "Other"]
 
@@ -39,13 +46,16 @@ def get_assistant() -> SupportAssistant:
 def init_state() -> None:
     ss = st.session_state
     ss.setdefault("messages", [])
-    ss.setdefault("conv", ConversationState())
     ss.setdefault("pending", None)
     ss.setdefault("escalation", None)  # None | {"triggers": [...]} | {"reference": ...}
     ss.setdefault("feedback_logged", {})
+    ss.setdefault("user_id", config.DEMO_USER_ID)
+    ss.setdefault("conv", ConversationState(user_id=ss.user_id))
+    ss.setdefault("accounts", AccountStore())  # simulated account data; survives Clear conversation
 
 
 def reset() -> None:
+    """Clear the conversation and any pending refund (agent_PRD.md FR-48, §11)."""
     for key in ["messages", "conv", "pending", "escalation", "feedback_logged"]:
         st.session_state.pop(key, None)
     init_state()
@@ -97,6 +107,48 @@ def render_feedback(idx: int, msg: dict) -> None:
             if reason == "Didn't solve my problem":
                 open_escalation(["E3_feedback_unsolved"])
                 st.rerun()
+
+
+def render_agent_steps(msg: dict) -> None:
+    if msg.get("agent_steps"):
+        with st.expander("Agent steps"):
+            st.code("\n".join(msg["agent_steps"]), language=None)
+
+
+def render_refund_confirmation() -> None:
+    """Confirm / Cancel for an eligible refund at or below the approval limit (§11)."""
+    refund = st.session_state.conv.refund
+    if refund.status != RefundStatus.AWAITING_CONFIRMATION:
+        return
+    with st.container(border=True):
+        st.markdown(f"**Refund eligible: {inr(refund.amount)}**")
+        st.markdown("Do you want to proceed with this refund?")
+        cols = st.columns(2)
+        if cols[0].button("Confirm Refund", type="primary", use_container_width=True):
+            st.session_state.pending = "Yes, proceed"
+        if cols[1].button("Cancel", use_container_width=True):
+            st.session_state.pending = "Cancel"
+
+
+def render_demo_account() -> None:
+    ss = st.session_state
+    with st.expander("Demo account"):
+        st.caption("Simulated data for the refund agent. The signed-in user comes from the session; "
+                   "the customer is never asked for it.")
+        ids = list(USERS)
+        chosen = st.selectbox("Signed-in user", ids, index=ids.index(ss.user_id),
+                              format_func=lambda u: f"{USERS[u]['name']} ({u})")
+        if chosen != ss.user_id:
+            ss.user_id = chosen
+            reset()
+            st.rerun()
+        for r in ss.accounts.users[ss.user_id]["recharges"]:
+            st.markdown(f"`{r['recharge_id']}` {inr(r['recharge_amount'])} · {r['recharge_age_days']}d ago · "
+                        f"{r['recharge_status']} · **{r['refund_status']}**")
+        if st.button("Reset demo data", use_container_width=True):
+            ss.accounts = AccountStore()
+            reset()
+            st.rerun()
 
 
 def render_escalation() -> None:
@@ -162,9 +214,9 @@ def answer(question: str) -> None:
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        with st.spinner("Searching NovaCell help content…"):
+        with st.spinner("Working on it…"):
             try:
-                turn = assistant.respond(question, prior, ss.conv)
+                turn = assistant.respond(question, prior, ss.conv, accounts=ss.accounts)
             except RuntimeError as exc:  # missing API key
                 st.error(str(exc))
                 ss.messages.pop()
@@ -184,6 +236,7 @@ def answer(question: str) -> None:
         "notice": turn.notice,
         "sources": [s.as_dict() for s in turn.cited_sources] if turn.kind in {"answer", "boundary"} else [],
         "topic": ",".join(sorted(categories)),
+        "agent_steps": turn.agent_steps,
     }
     ss.messages.append(msg)
     if turn.triggers:
@@ -202,6 +255,7 @@ with st.sidebar:
     if st.button("🗑️ Clear conversation", use_container_width=True):
         reset()
         st.rerun()
+    render_demo_account()
     st.divider()
     st.subheader("Try asking")
     for q in SAMPLE_QUESTIONS:
@@ -224,8 +278,10 @@ for i, m in enumerate(st.session_state.messages):
         st.markdown(m["content"])
         if m["role"] == "assistant":
             render_sources(m)
+            render_agent_steps(m)
             render_feedback(i, m)
 
+render_refund_confirmation()
 render_escalation()
 
 typed = st.chat_input("Ask about data, bills, SIM, roaming, calls…", max_chars=config.MAX_INPUT_CHARS)
